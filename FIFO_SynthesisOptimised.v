@@ -65,12 +65,16 @@ output reg full);
             rdptr_grey <= 0;
         end
         else if(rdvalid) begin
-            //Data Read
-            datOut <= mem[rdptr_bin[pSize-1:0]];
-
             //Read Pointer Updation
             rdptr_bin <= rdptr_bin_next;
             rdptr_grey <= rdptr_grey_next;
+        end
+    end
+
+    always @(posedge rclk) begin
+        if (rdvalid) begin
+            //Data Read
+            datOut <= mem[rdptr_bin[pSize-1:0]];
         end
     end
 
@@ -84,6 +88,7 @@ output reg full);
             empty <= (rdptr_grey_next == wrptr_sync2);
         end
     end
+    
 
 //Write Clock Behaviour
     always@(posedge wclk or negedge rst) begin
@@ -106,12 +111,16 @@ output reg full);
             wrptr_grey <= 0;
         end
         else if(wrvalid) begin
-            //Data Write
-            mem[wrptr_bin[pSize-1:0]] <= datIn;
-
             //Write Pointer Updation
             wrptr_bin <= wrptr_bin_next;
             wrptr_grey <= wrptr_grey_next;
+        end
+    end
+
+    always@(posedge wclk) begin
+        if(wrvalid) begin
+            //Data Write
+            mem[wrptr_bin[pSize-1:0]] <= datIn;
         end
     end
 

@@ -1,95 +1,141 @@
-`timescale 1ns / 1ns
-`include "FIFO.v"
+`timescale 1ns/1ps
+`include "FIFO_SynthesisOptimised.v"
 
-module tb_top;
+module FIFO_tb;
 
-    parameter width = 16;
-    parameter depth = 32;
+    localparam WIDTH  = 16;
+    localparam HEIGHT = 16;
 
-    // Inputs to UUT (reg)
-    reg LCLK;
-    reg RCLK;
-    reg WRDV;
-    reg RDEN;
-    reg [width-1:0] WRDAT;
+    reg                 rst;
+    reg                 wclk;
+    reg                 rclk;
+    reg                 wEn;
+    reg                 rEn;
+    reg  [WIDTH-1:0]    datIn;
 
-    // Outputs from UUT (wire)
-    wire F;
-    wire E;
-    wire [width-1:0] RDDAT;
+    wire [WIDTH-1:0]    datOut;
+    wire                empty;
+    wire                full;
 
-    // Instantiate UUT
-    top #(
-        .width(width),
-        .depth(depth)
-    ) uut (
-        .LCLK(LCLK),
-        .RCLK(RCLK),
-        .WRDV(WRDV),
-        .RDEN(RDEN),
-        .WRDAT(WRDAT),
-        .F(F),
-        .E(E),
-        .RDDAT(RDDAT)
+    //Instantiate the DUT
+    FIFO #(
+        .WIDTH  (WIDTH),
+        .HEIGHT (HEIGHT)
+    ) dut (
+        .rst    (rst),
+        .rclk   (rclk),
+        .wclk   (wclk),
+        .wEn    (wEn),
+        .rEn    (rEn),
+        .datIn  (datIn),
+        .datOut (datOut),
+        .empty  (empty),
+        .full   (full)
     );
 
-    // 1. Simple, continuous clock generators
-    always #5 LCLK = (LCLK === 1'b0) ? 1'b1 : 1'b0;
-    always #7 RCLK = (RCLK === 1'b0) ? 1'b1 : 1'b0;
-
-    // 2. Absolute hardcoded stimulus sequence
+    //Clock Generation
     initial begin
-        // Initialize everything strictly to 0
-        LCLK  = 0;
-        RCLK  = 0;
-        WRDV  = 0;
-        RDEN  = 0;
-        WRDAT = 0;
+        wclk = 0;
+        forever #5 wclk = ~wclk;
+    end
 
-        // Open wave dump files
-        $dumpfile("FIFO_tb.vcd");
-        $dumpvars(0, tb_top);
-        
-        #20; // Let the system settle
+    initial begin
+        rclk = 0;
+        forever #10 rclk = ~rclk; 
+    end
 
-        $display("--- Starting Simple Hardcoded Test ---");
+    //Print buffer contents in a clean, single-line format
 
-        // --- WRITE 1 ---
-        WRDAT = 16'hAAAA;
-        WRDV  = 1;
-        #10; // Hold for 1 LCLK cycle
-        WRDV  = 0;
-        #10;
+    task display_buffer(input [8*8-1:0] trigger_event);
+        integer i;
+        begin
+            $write("[%0t ps | Trigger: %s] wptr:%0d rdptr:%0d | F:%b E:%b | MEM: [ ",
+                   $time, trigger_event, dut.wrptr_bin, dut.rdptr_bin, full, empty);
+            for (i = 0; i < HEIGHT; i = i + 1) begin
+                $write("%04h ", dut.mem[i]);
+            end
+            $write("]\n");
+        end
+    endtask
 
-        // --- WRITE 2 ---
-        WRDAT = 16'hBBBB;
-        WRDV  = 1;
-        #10;
-        WRDV  = 0;
-        #20;
+    //Triggered on posedge of EITHER wclk or rclk
+    initial begin
+        //Wait until out of initial reset so we don't spam during initialisation
+        @(posedge rst);
+        forever begin
+            @(posedge wclk or posedge rclk);
+            // #1 delta delay allows non-blocking register updates to settle
+            #1;
+            if (wclk && rclk)
+                display_buffer("BOTH_CLK");
+            else if (wclk)
+                display_buffer("WCLK_EDGE");
+            else
+                display_buffer("RCLK_EDGE");
+        end
+    end
 
-        // --- WRITE 3 ---
-        WRDAT = 16'hCCCC;
-        WRDV  = 1;
-        #10;
-        WRDV  = 0;
-        #30; // Wait a bit
+    //Main Test Stimulus
+    initial begin
+        $dumpfile("fifo_concurrent_dump.vcd");
+        $dumpvars(0, FIFO_tb);
 
-        // --- READ 1 ---
-        RDEN = 1;
-        #14; // Hold for roughly 1 RCLK cycle
-        RDEN = 0;
-        $display("[%0t ns] Output after Read 1: %h", $time, RDDAT);
-        #20;
+        // Signal initialisation
+        wEn   = 1'b0;
+        rEn   = 1'b0;
+        datIn = {WIDTH{1'b0}};
+        rst   = 1'b0; //Assert active-low reset
 
-        // --- READ 2 ---
-        RDEN = 1;
-        #14;
-        RDEN = 0;
-        $display("[%0t ns] Output after Read 2: %h", $time, RDDAT);
         #40;
+        @(negedge wclk);
+        rst   = 1'b1; //Deassert reset
 
-        $display("--- Hardcoded Test Complete ---");
+        //Concurrently run producer (writes) and consumer (reads)
+        fork
+            //Write Process (Producer)
+            begin
+                repeat (30) begin
+                    @(posedge wclk);
+                    if (!full) begin
+                        wEn   <= 1'b1;
+                        datIn <= $urandom_range(16'h1000, 16'hFFFF);
+                    end else begin
+                        wEn   <= 1'b0; // Stall on full
+                    end
+                end
+                @(posedge wclk);
+                wEn <= 1'b0;
+            end
+
+            //Read Process (Consumer)
+            begin
+                //Let a few items enter the buffer first
+                repeat (3) @(posedge rclk);
+
+                repeat (30) begin
+                    @(posedge rclk);
+                    if (!empty) begin
+                        rEn <= 1'b1;
+                    end else begin
+                        rEn <= 1'b0; //Stall on empty
+                    end
+                end
+                @(posedge rclk);
+                rEn <= 1'b0;
+            end
+        join
+
+        //Drain any remaining words
+        $display("\n--- Draining any remaining entries ---");
+        while (!empty) begin
+            @(posedge rclk);
+            rEn <= 1'b1;
+            @(posedge rclk);
+            rEn <= 1'b0;
+        end
+
+        #100;
+        $display("\nSimulation Complete.");
         $finish;
     end
 
